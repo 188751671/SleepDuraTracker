@@ -24,8 +24,4 @@ It’s built with Python and packaged as an Automator `.app` for easy sharing �
 
 ## ▶️ Usage
 1. **Double-click** the app to run it.
-2. It will:
-   - Parse the last 7 days of `pmset` logs.
-   - Find all `Display is turned off → on` pairs inside your nightly window.
-   - Apply the 4-hour minimum rule and sum multiple segments per date.
-   - Append new results to `sleepDuras.csv` on your Desktop.
+2. It will create `sleepDuras.csv` on your Desktop as the result.
