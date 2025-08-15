@@ -1,0 +1,111 @@
+/usr/bin/python3 - <<'PYCODE'
+import csv, re, subprocess
+from datetime import datetime, time, timedelta
+from pathlib import Path
+from collections import defaultdict
+
+# -------- CONFIG --------
+WINDOW_START = time(23, 0)   # 23:00
+WINDOW_END   = time(13, 0)   # 13:00 (next day)
+MIN_DURATION_MIN = 240       # 4 hours minimum
+LAST_N_DAYS = 7
+LOG_PATH = Path.home() / "Desktop" / "sleepDuras.csv"
+PIPE_CMD = r'pmset -g log | grep -E "Display is turned (off|on)"'
+# ------------------------
+
+LINE_RE = re.compile(
+    r'^(\d{4}-\d{2}-\d{2})\s+'
+    r'(\d{2}:\d{2}:\d{2})\s+'
+    r'([+\-]\d{4})\s+\S+\s+Display is turned (off|on)\s*$'
+)
+
+def run_cmd():
+    p = subprocess.Popen(PIPE_CMD, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    out, err = p.communicate()
+    if p.returncode not in (0, 1):
+        raise RuntimeError(err.strip() or "Failed to run pmset/grep")
+    return out
+
+def parse_events(text):
+    events = []
+    for line in text.splitlines():
+        m = LINE_RE.match(line.strip())
+        if m:
+            d, t, off, state = m.groups()
+            dt = datetime.strptime(f"{d} {t} {off}", "%Y-%m-%d %H:%M:%S %z")
+            events.append((dt, state))
+    events.sort(key=lambda x: x[0])
+    return events
+
+def pair_off_on(events):
+    last_off = None
+    for dt, state in events:
+        if state == "off":
+            last_off = dt
+        elif state == "on" and last_off and dt > last_off:
+            yield last_off, dt
+            last_off = None
+
+def in_window_wrap(local_t: time, start: time, end: time) -> bool:
+    if start <= end:
+        return start <= local_t < end
+    else:
+        return local_t >= start or local_t < end
+
+def sleep_in_window(off_dt: datetime, on_dt: datetime, start: time, end: time) -> bool:
+    # both OFF and ON must be in the nightly window
+    off_local_t = off_dt.timetz().replace(tzinfo=None)
+    on_local_t  = on_dt.timetz().replace(tzinfo=None)
+    return in_window_wrap(on_local_t, start, end) and in_window_wrap(off_local_t, start, end)
+
+def hm_dot(mins: int) -> str:
+    return f"{mins//60}.{mins%60:02d}"
+
+def ensure_csv_header(path: Path):
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="") as f:
+            csv.writer(f).writerow(["date", "duration_hm"])
+
+def existing_dates(path: Path):
+    s = set()
+    if not path.exists():
+        return s
+    with path.open("r", newline="") as f:
+        r = csv.DictReader(f)
+        for row in r:
+            if row.get("date"):
+                s.add(row["date"])
+    return s
+
+def main():
+    now = datetime.now().astimezone()
+    cutoff = now - timedelta(days=LAST_N_DAYS)
+    events = parse_events(run_cmd())
+    pairs = [(a, b) for a, b in pair_off_on(events) if b >= cutoff]
+
+    # Sum qualifying segments (>=4h) per ON date inside the window
+    total_by_date = defaultdict(int)
+    for off_dt, on_dt in pairs:
+        if not sleep_in_window(off_dt, on_dt, WINDOW_START, WINDOW_END):
+            continue
+        dur_min = int((on_dt - off_dt).total_seconds() // 60)
+        if dur_min >= MIN_DURATION_MIN:
+            key_date = on_dt.astimezone().strftime("%Y-%m-%d")
+            total_by_date[key_date] += dur_min
+
+    # Write new rows only (skip already recorded dates)
+    ensure_csv_header(LOG_PATH)
+    seen = existing_dates(LOG_PATH)
+    rows = [[d, hm_dot(total_by_date[d])] for d in sorted(total_by_date) if d not in seen and total_by_date[d] > 0]
+
+    if rows:
+        with LOG_PATH.open("a", newline="") as f:
+            csv.writer(f).writerows(rows)
+        print(f"Appended {len(rows)} day(s) -> {LOG_PATH}")
+    else:
+        print("Nothing new to append.")
+
+if __name__ == "__main__":
+    main()
+PYCODE
