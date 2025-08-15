@@ -1,5 +1,5 @@
 # 💤 Sleep Tracker for macOS
-Sleep Duration Tracker for people who use Mac before going to sleep and open the Mac soon after waking up.
+Tracks your nightly sleep if you use your Mac right before bed and soon after waking up
 
 It reads your Mac’s power logs to detect **nightly sleep durations** and records them to a CSV file.  
 It’s built with Python and packaged as an Automator `.app` for easy sharing — just double-click to run.
