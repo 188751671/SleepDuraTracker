@@ -17,7 +17,7 @@ It’s built with Python and packaged as an Automator `.app` for easy sharing �
 - Access permission to read system power logs (`pmset`) and write to your Desktop.
 
 ## 📥 Installation
-1. Download the latest `Sleep Tracker.app` from the [Releases](../../releases) page (or receive it via AirDrop/zip).
+1. Download the latest `Sleep Tracker.app` from the [Releases](../../releases) page.
 2. Move it to your preferred location (e.g., `Applications` or Desktop).
 3. On first run, right-click → **Open** → confirm the security prompt.
 4. Grant permissions if macOS asks for **Desktop folder access**.
