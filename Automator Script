@@ -2,12 +2,11 @@
 import csv, re, subprocess
 from datetime import datetime, time, timedelta
 from pathlib import Path
-from collections import defaultdict
 
 # -------- CONFIG --------
 WINDOW_START = time(23, 0)   # 23:00
 WINDOW_END   = time(13, 0)   # 13:00 (next day)
-MIN_DURATION_MIN = 240       # 4 hours minimum
+MIN_DURATION_MIN = 240       # 4 hours
 LAST_N_DAYS = 7
 LOG_PATH = Path.home() / "Desktop" / "sleepDuras.csv"
 PIPE_CMD = r'pmset -g log | grep -E "Display is turned (off|on)"'
@@ -27,77 +26,100 @@ def run_cmd():
     return out
 
 def parse_events(text):
-    events = []
+    events=[]
     for line in text.splitlines():
-        m = LINE_RE.match(line.strip())
+        m=LINE_RE.match(line.strip())
         if m:
-            d, t, off, state = m.groups()
-            dt = datetime.strptime(f"{d} {t} {off}", "%Y-%m-%d %H:%M:%S %z")
-            events.append((dt, state))
-    events.sort(key=lambda x: x[0])
+            d,t,off,state=m.groups()
+            dt=datetime.strptime(f"{d} {t} {off}","%Y-%m-%d %H:%M:%S %z")
+            events.append((dt,state))
+    events.sort(key=lambda x:x[0])
     return events
 
 def pair_off_on(events):
-    last_off = None
-    for dt, state in events:
-        if state == "off":
-            last_off = dt
-        elif state == "on" and last_off and dt > last_off:
+    last_off=None
+    for dt,state in events:
+        if state=="off":
+            last_off=dt
+        elif state=="on" and last_off and dt>last_off:
             yield last_off, dt
-            last_off = None
+            last_off=None
 
-def in_window_wrap(local_t: time, start: time, end: time) -> bool:
-    if start <= end:
-        return start <= local_t < end
+# ---- night window helpers (bind each pair to ON's night) ----
+def night_bounds_for_on(on_dt: datetime, start_t: time, end_t: time):
+    local_on = on_dt.astimezone()
+    d = local_on.date()
+    if start_t <= end_t:
+        # non-wrapping window (e.g., 01:00->13:00)
+        night_start = datetime.combine(d, start_t, tzinfo=local_on.tzinfo)
+        if local_on.time() < start_t:
+            d_prev = d - timedelta(days=1)
+            night_start = datetime.combine(d_prev, start_t, tzinfo=local_on.tzinfo)
+        night_end = datetime.combine(night_start.date(), end_t, tzinfo=local_on.tzinfo)
+        if night_end <= night_start:
+            night_end += timedelta(days=1)
     else:
-        return local_t >= start or local_t < end
+        # wrapping window (e.g., 23:00->13:00)
+        night_end = datetime.combine(d, end_t, tzinfo=local_on.tzinfo)
+        if local_on.time() >= end_t:
+            night_end += timedelta(days=1)
+        night_start = datetime.combine(night_end.date()-timedelta(days=1), start_t, tzinfo=local_on.tzinfo)
+    return night_start, night_end
 
-def sleep_in_window(off_dt: datetime, on_dt: datetime, start: time, end: time) -> bool:
-    # both OFF and ON must be in the nightly window
-    off_local_t = off_dt.timetz().replace(tzinfo=None)
-    on_local_t  = on_dt.timetz().replace(tzinfo=None)
-    return in_window_wrap(on_local_t, start, end) and in_window_wrap(off_local_t, start, end)
+def pair_in_same_night(off_dt: datetime, on_dt: datetime, start_t: time, end_t: time) -> bool:
+    night_start, night_end = night_bounds_for_on(on_dt, start_t, end_t)
+    return (night_start <= off_dt <= on_dt <= night_end)
 
-def hm_dot(mins: int) -> str:
+def hm_dot(mins:int)->str:
     return f"{mins//60}.{mins%60:02d}"
 
 def ensure_csv_header(path: Path):
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", newline="") as f:
-            csv.writer(f).writerow(["date", "duration_hm"])
+            csv.writer(f).writerow(["date","duration_hm"])
 
 def existing_dates(path: Path):
-    s = set()
-    if not path.exists():
-        return s
+    s=set()
+    if not path.exists(): return s
     with path.open("r", newline="") as f:
-        r = csv.DictReader(f)
+        r=csv.DictReader(f)
         for row in r:
-            if row.get("date"):
-                s.add(row["date"])
+            if row.get("date"): s.add(row["date"])
     return s
 
 def main():
     now = datetime.now().astimezone()
     cutoff = now - timedelta(days=LAST_N_DAYS)
-    events = parse_events(run_cmd())
-    pairs = [(a, b) for a, b in pair_off_on(events) if b >= cutoff]
 
-    # Sum qualifying segments (>=4h) per ON date inside the window
-    total_by_date = defaultdict(int)
+    events = parse_events(run_cmd())
+    pairs = [(a,b) for a,b in pair_off_on(events) if b >= cutoff]
+
+    # Keep ONLY the single longest qualifying segment per ON date
+    longest_by_date = {}
     for off_dt, on_dt in pairs:
-        if not sleep_in_window(off_dt, on_dt, WINDOW_START, WINDOW_END):
+        if not pair_in_same_night(off_dt, on_dt, WINDOW_START, WINDOW_END):
             continue
         dur_min = int((on_dt - off_dt).total_seconds() // 60)
-        if dur_min >= MIN_DURATION_MIN:
-            key_date = on_dt.astimezone().strftime("%Y-%m-%d")
-            total_by_date[key_date] += dur_min
+        if dur_min < MIN_DURATION_MIN:
+            continue
 
-    # Write new rows only (skip already recorded dates)
+        # Determine ON-date key (morning date)
+        on_local = on_dt.astimezone()
+        date_key = on_local.strftime("%Y-%m-%d")
+
+        # Optional sanity: cap impossible durations to night length + small buffer
+        n_start, n_end = night_bounds_for_on(on_dt, WINDOW_START, WINDOW_END)
+        night_len_min = int((n_end - n_start).total_seconds() // 60)
+        if dur_min > night_len_min + 30:
+            continue
+
+        if date_key not in longest_by_date or dur_min > longest_by_date[date_key]:
+            longest_by_date[date_key] = dur_min
+
     ensure_csv_header(LOG_PATH)
     seen = existing_dates(LOG_PATH)
-    rows = [[d, hm_dot(total_by_date[d])] for d in sorted(total_by_date) if d not in seen and total_by_date[d] > 0]
+    rows = [[d, hm_dot(longest_by_date[d])] for d in sorted(longest_by_date) if d not in seen]
 
     if rows:
         with LOG_PATH.open("a", newline="") as f:
@@ -106,6 +128,6 @@ def main():
     else:
         print("Nothing new to append.")
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
 PYCODE
